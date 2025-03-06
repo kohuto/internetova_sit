@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Interaktivní graf</title>
+  <style>
+    /* Základní reset a nastavení fontu */
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+      background: #f4f4f4;
+    }
+    .container {
+      max-width: 1200px;
+      margin: auto;
+      padding: 20px;
+    }
+    /* Styl pro legendu */
+    #legend {
+      background: #fff;
+      padding: 15px;
+      border-radius: 5px;
+      box-shadow: 0 0 10px rgba(0,0,0,0.1);
+      margin-bottom: 20px;
+    }
+    #legend ul {
+      list-style: none;
+      padding-left: 20px;
+    }
+    #legend li {
+      margin-bottom: 5px;
+    }
+    /* Wrapper pro canvas a tlačítka s relativním pozicováním */
+    #canvasWrapper {
+      position: relative;
+    }
+    /* Tlačítko umístěné v pravém horním rohu kreslící plochy (zůstalo pouze tlačítko Reset) */
+    #controls {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      z-index: 10;
+      display: flex;
+      gap: 10px;
+    }
+    button {
+      padding: 10px 20px;
+      border: none;
+      background: #007BFF;
+      color: #fff;
+      border-radius: 5px;
+      cursor: pointer;
+      transition: background 0.3s;
+    }
+    button:hover {
+      background: #0056b3;
+    }
+    /* Responzivní canvas */
+    canvas {
+      background: #fff;
+      border: 1px solid #ccc;
+      width: 100%;
+      height: auto;
+      display: block;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <!-- Legenda s návodem, nyní nad canvas -->
+    <div id="legend">
+      <strong>Návod:</strong>
+      <ul>
+        <li><strong>Vytváření hran:</strong> Přetáhněte hranu z jednoho uzlu na druhý (drag and drop).</li>
+        <li><strong>Mazání hran:</strong> Kliknutím na hranu ji smažete.</li>
+        <li><strong>Mazání uzlů:</strong> Dvojklikem na uzel jej smažete spolu se všemi připojenými hranami.</li>
+      </ul>
+    </div>
+    <!-- Canvas a ovládací tlačítko -->
+    <div id="canvasWrapper">
+      <canvas id="graphCanvas" width="800" height="600"></canvas>
+      <div id="controls">
+        <button id="resetBtn">Reset</button>
+      </div>
+    </div>
+  </div>
+  
+  <script>
+    /* Uložení původního stavu sítě */
+    const initialNodes = [
+      { id: 1, x: 100, y: 100 },
+      { id: 2, x: 80, y: 200 },
+      { id: 3, x: 250, y: 150 },
+      { id: 4, x: 420, y: 120 },
+      { id: 5, x: 550, y: 100 },
+      { id: 6, x: 650, y: 170 },
+      { id: 7, x: 230, y: 300 },
+      { id: 8, x: 350, y: 400 },
+      { id: 9, x: 500, y: 220 },
+      { id: 10, x: 450, y: 300 },
+      { id: 11, x: 600, y: 320 },
+      { id: 12, x: 700, y: 250 }
+    ];
+
+    const initialEdges = [
+      { from: 1, to: 3, isNew: false },
+      { from: 2, to: 3, isNew: false },
+      { from: 3, to: 4, isNew: false },
+      { from: 4, to: 7, isNew: false },
+      { from: 4, to: 8, isNew: false },
+      { from: 4, to: 5, isNew: false },
+      { from: 5, to: 6, isNew: false },
+      { from: 9, to: 10, isNew: false },
+      { from: 9, to: 11, isNew: false },
+      { from: 10, to: 11, isNew: false },
+      { from: 11, to: 12, isNew: false }
+    ];
+
+    // Pracovní kopie uzlů a hran
+    let nodes = JSON.parse(JSON.stringify(initialNodes));
+    let edges = JSON.parse(JSON.stringify(initialEdges));
+
+    const canvas = document.getElementById('graphCanvas');
+    const ctx = canvas.getContext('2d');
+
+    let dragStartNode = null;
+    let isDragging = false;
+    let currentMousePos = { x: 0, y: 0 };
+
+    // Nastavíme maximální velikost uzlu (šířka/výška)
+    const nodeSize = 80;
+
+    // Načteme obrázek, který bude použit místo kresleného kruhu
+    const nodeImage = new Image();
+    nodeImage.src = "chytrakrizovatka_kratka.svg";
+
+    // Přidáme obsluhu načtení či chyby obrázku
+    nodeImage.onload = () => { drawGraph(); };
+    nodeImage.onerror = () => { 
+      console.error("Obrázek se nepodařilo načíst, použije se fallback.");
+      drawGraph();
+    };
+    // Zavoláme drawGraph() pro případ, že obrázek je již v cache
+    drawGraph();
+
+    // Přepočítá pozici myši na vnitřní rozlišení canvasu
+    function getMousePos(evt) {
+      const rect = canvas.getBoundingClientRect();
+      return {
+        x: (evt.clientX - rect.left) * (canvas.width / rect.width),
+        y: (evt.clientY - rect.top) * (canvas.height / rect.height)
+      };
+    }
+
+    // Vrátí uzel, pokud je bod uvnitř oblasti obrázku
+    function nodeAtPos(pos) {
+      return nodes.find(node => {
+        const half = nodeSize / 2;
+        return (pos.x >= node.x - half &&
+                pos.x <= node.x + half &&
+                pos.y >= node.y - half &&
+                pos.y <= node.y + half);
+      });
+    }
+
+    // Výpočet vzdálenosti bodu od úsečky (pro detekci kliknutí na hranu)
+    function pointLineDistance(point, lineStart, lineEnd) {
+      const A = point.x - lineStart.x;
+      const B = point.y - lineStart.y;
+      const C = lineEnd.x - lineStart.x;
+      const D = lineEnd.y - lineStart.y;
+      const dot = A * C + B * D;
+      const lenSq = C * C + D * D;
+      let param = lenSq ? dot / lenSq : -1;
+      let xx, yy;
+      if (param < 0) { 
+        xx = lineStart.x; 
+        yy = lineStart.y; 
+      } else if (param > 1) { 
+        xx = lineEnd.x; 
+        yy = lineEnd.y; 
+      } else { 
+        xx = lineStart.x + param * C; 
+        yy = lineStart.y + param * D; 
+      }
+      const dx = point.x - xx;
+      const dy = point.y - yy;
+      return Math.sqrt(dx * dx + dy * dy);
+    }
+
+    // Zjistí, zda bylo kliknuto na hranu – platí nyní i pro původní hrany
+    function edgeAtPos(pos) {
+      for (let i = 0; i < edges.length; i++) {
+        const edge = edges[i];
+        const nodeA = nodes.find(n => n.id === edge.from);
+        const nodeB = nodes.find(n => n.id === edge.to);
+        if (!nodeA || !nodeB) continue;
+        const dist = pointLineDistance(pos, nodeA, nodeB);
+        if (dist < 5) { // Prahová hodnota pro detekci kliknutí na hranu
+          return { edge, index: i };
+        }
+      }
+      return null;
+    }
+
+    // Vykreslení celé sítě (hran, uzlů a náhledu při drag and drop)
+    function drawGraph() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // Vykreslení hran
+      edges.forEach(edge => {
+        const nodeA = nodes.find(n => n.id === edge.from);
+        const nodeB = nodes.find(n => n.id === edge.to);
+        if (!nodeA || !nodeB) return;
+        ctx.strokeStyle = edge.isNew ? 'red' : 'black';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(nodeA.x, nodeA.y);
+        ctx.lineTo(nodeB.x, nodeB.y);
+        ctx.stroke();
+      });
+
+      // Náhled hrany při drag and drop
+      if (isDragging && dragStartNode) {
+        ctx.strokeStyle = 'blue';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(dragStartNode.x, dragStartNode.y);
+        ctx.lineTo(currentMousePos.x, currentMousePos.y);
+        ctx.stroke();
+      }
+
+      // Vykreslení uzlů pomocí vlastního obrázku s zachováním poměru stran
+      nodes.forEach(node => {
+        if (nodeImage.complete && nodeImage.naturalWidth > 0) {
+          const scale = Math.min(nodeSize / nodeImage.naturalWidth, nodeSize / nodeImage.naturalHeight);
+          const drawWidth = nodeImage.naturalWidth * scale;
+          const drawHeight = nodeImage.naturalHeight * scale;
+          ctx.drawImage(nodeImage, node.x - drawWidth / 2, node.y - drawHeight / 2, drawWidth, drawHeight);
+        } else {
+          const half = nodeSize / 2;
+          ctx.beginPath();
+          ctx.arc(node.x, node.y, half, 0, 2 * Math.PI);
+          ctx.fillStyle = 'white';
+          ctx.fill();
+          ctx.lineWidth = 2;
+          ctx.strokeStyle = 'black';
+          ctx.stroke();
+        }
+        // Vykreslení bílého kruhu pro číslo (poloměr nastavený na nodeSize/4)
+        const textCircleRadius = nodeSize / 7;
+        ctx.beginPath();
+        ctx.arc(node.x, node.y, textCircleRadius, 0, 2 * Math.PI);
+        ctx.fillStyle = 'white';
+        ctx.fill();
+        // Vykreslení čísla uzlu uprostřed tohoto bílého kruhu
+        ctx.fillStyle = 'black';
+        ctx.font = '16px Arial';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(node.id, node.x, node.y);
+      });
+    }
+
+    /* --- Obsluha událostí --- */
+
+    // Drag and drop pro tvorbu hran
+    canvas.addEventListener('mousedown', (evt) => {
+      const pos = getMousePos(evt);
+      const node = nodeAtPos(pos);
+      if (node) {
+        dragStartNode = node;
+        isDragging = true;
+      }
+    });
+
+    canvas.addEventListener('mousemove', (evt) => {
+      if (isDragging) {
+        currentMousePos = getMousePos(evt);
+        drawGraph();
+      }
+    });
+
+    canvas.addEventListener('mouseup', (evt) => {
+      if (isDragging && dragStartNode) {
+        const pos = getMousePos(evt);
+        const endNode = nodeAtPos(pos);
+        if (endNode && endNode.id !== dragStartNode.id) {
+          const exists = edges.some(e =>
+            (e.from === dragStartNode.id && e.to === endNode.id) ||
+            (e.from === endNode.id && e.to === dragStartNode.id)
+          );
+          if (!exists) {
+            edges.push({ from: dragStartNode.id, to: endNode.id, isNew: true });
+          }
+        }
+      }
+      isDragging = false;
+      dragStartNode = null;
+      drawGraph();
+    });
+
+    // Kliknutí na hranu pro její smazání (platí pro všechny hrany)
+    canvas.addEventListener('click', (evt) => {
+      const pos = getMousePos(evt);
+      if (nodeAtPos(pos)) return;
+      const clickedEdge = edgeAtPos(pos);
+      if (clickedEdge) {
+        edges.splice(clickedEdge.index, 1);
+        drawGraph();
+      }
+    });
+
+    // Dvojklik na uzel – smazání uzlu a všech jeho připojených hran
+    canvas.addEventListener('dblclick', (evt) => {
+      const pos = getMousePos(evt);
+      const node = nodeAtPos(pos);
+      if (node) {
+        nodes = nodes.filter(n => n.id !== node.id);
+        edges = edges.filter(e => e.from !== node.id && e.to !== node.id);
+        drawGraph();
+      }
+    });
+
+    // Tlačítko pro reset původní sítě
+    document.getElementById('resetBtn').addEventListener('click', () => {
+      nodes = JSON.parse(JSON.stringify(initialNodes));
+      edges = JSON.parse(JSON.stringify(initialEdges));
+      drawGraph();
+    });
+
+    // Responzivní design: při změně velikosti okna se canvas škáluje
+    function resizeCanvas() {
+      canvas.style.width = '100%';
+      canvas.style.height = 'auto';
+    }
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+  </script>
+</body>
+</html>
